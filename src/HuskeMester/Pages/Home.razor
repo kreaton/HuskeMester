@@ -1,0 +1,295 @@
+@page "/"
+@implements IDisposable
+@inject IJSRuntime JS
+
+<PageTitle>HuskeMester</PageTitle>
+
+<main class="huske-page">
+    <header class="title">
+        <h1>HuskeMester</h1>
+        <div class="title-buttons">
+            <button class="pill sound-btn" @onclick="ToggleSound"
+                    aria-label="@(_soundOn ? "Slå lyden fra" : "Slå lyden til")">
+                @(_soundOn ? "🔊" : "🔇")
+            </button>
+            <a class="kg-home" href="../" aria-label="Alle spil" title="Alle spil"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11.5 12 4l9 7.5M5.5 9.5V20h4.5v-6h4v6h4.5V9.5" /></svg><span class="kg-text">Alle spil</span></a>
+        </div>
+    </header>
+
+    <div class="toolbar">
+        <div class="segmented sizes" role="group" aria-label="Antal kort">
+            @foreach (var size in MemoryGame.Sizes)
+            {
+                var s = size;
+                <button class="@(s == _size ? "active" : "")" aria-pressed="@(s == _size)"
+                        aria-label="@($"{s} gange {s} kort")" @onclick="() => SetSize(s)">@s×@s</button>
+            }
+        </div>
+        <div class="stats" aria-live="polite">
+            <span class="stat"><span class="stat-label">Træk</span><span class="stat-value">@_game.Moves</span></span>
+            <span class="stat"><span class="stat-label">Par</span><span class="stat-value">@_game.Pairs/@_game.TotalPairs</span></span>
+            <span class="stat"><span class="stat-label">Tid</span><span class="stat-value">@Clock(Elapsed)</span></span>
+        </div>
+    </div>
+
+    <div class="feedback" aria-live="polite">
+        <div class="message @_messageKind" @key="_messageKey">@_message</div>
+    </div>
+
+    <section class="board-wrap" aria-label="Spillepladen">
+        <div class="board" style="--n:@_game.Size">
+            @foreach (var cell in _game.Cells)
+            {
+                if (cell is null)
+                {
+                    <div class="free" aria-label="Fri plads">⭐</div>
+                }
+                else
+                {
+                    var card = cell;
+                    var up = card.IsUp || card.IsMatched;
+                    <button @key="card" class="card @(up ? "up" : "") @(card.IsMatched ? "matched" : "") @(_game.IsMissCard(card) ? "miss" : "")"
+                            aria-label="@CardLabel(card)" aria-disabled="@(up ? "true" : "false")"
+                            @onclick="() => Tap(card)">
+                        <span class="inner">
+                            <span class="side back" aria-hidden="true">?</span>
+                            <span class="side front" aria-hidden="true"><span class="emoji">@card.Emoji</span></span>
+                        </span>
+                    </button>
+                }
+            }
+        </div>
+    </section>
+
+    <button class="chip restart" @onclick="NewGame" title="Bland kortene og start forfra">🔄 Nyt spil</button>
+
+    <footer class="credits">Lavet med kærlighed 💛 (c) 2026 Per Hejndorf, Kreaton – @BuildInfo.Display</footer>
+
+    @if (_party)
+    {
+        <div class="party">
+            @for (var i = 0; i < 36; i++)
+            {
+                <span class="rain" style="@Rain(i)">@_game.Pictures[i % _game.Pictures.Count]</span>
+            }
+            <div class="party-card" role="dialog" aria-labelledby="party-text">
+                <div class="party-trophy" aria-hidden="true">🏆</div>
+                <div class="party-text" id="party-text">Du fandt alle par!</div>
+                <div class="party-stats">@_game.Moves træk · @Clock(Elapsed)</div>
+                <div class="party-best">@_bestText</div>
+                <button class="big-btn next-btn" @ref="_againButton" @onclick="NewGame">Spil igen ➜</button>
+            </div>
+        </div>
+    }
+</main>
+
+@code {
+    private const string SizeKey = "huskemester.size";
+    private const string BestKeyPrefix = "huskemester.best.";
+    private const int MissShowMs = 1150;
+
+    private readonly MemoryGame _game = new();
+    private int _size = 4;
+    private int _round;              // bumped by every new game, so a pending flip-back from an old game is dropped
+
+    private DateTime? _startedAt;
+    private TimeSpan? _finalTime;
+    private Timer? _clock;
+
+    private string _message = "";
+    private string _messageKind = "info";
+    private int _messageKey;
+    private bool _party;
+    private bool _focusAgain;
+    private string _bestText = "";
+    private bool _soundOn = true;
+    private ElementReference _againButton;
+
+    private static readonly string[] MatchCheers = ["Et par! 👏", "Flot! 🎉", "Godt husket! 🧠", "Super! ⭐", "Sådan! 🙌"];
+    private static readonly string[] MissHints = ["Ikke ens. Prøv igen! 🤔", "Husk, hvor de ligger! 👀", "Næsten! Prøv et andet kort 🤔"];
+
+    private TimeSpan Elapsed => _finalTime ?? (_startedAt is { } start ? DateTime.UtcNow - start : TimeSpan.Zero);
+
+    protected override void OnInitialized() => StartGame();
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            var saved = await Load(SizeKey);
+            if (int.TryParse(saved, out var size) && MemoryGame.Sizes.Contains(size) && size != _size)
+            {
+                _size = size;
+                StartGame();
+                StateHasChanged();
+            }
+        }
+
+        if (_focusAgain)
+        {
+            _focusAgain = false;
+            try { await _againButton.FocusAsync(); } catch (InvalidOperationException) { }
+        }
+    }
+
+    // ---------- Playing ----------
+
+    private void NewGame()
+    {
+        _party = false;
+        StartGame();
+    }
+
+    private void StartGame()
+    {
+        _round++;
+        StopClock();
+        _startedAt = null;
+        _finalTime = null;
+        _game.NewGame(_size);
+        Say(_size % 2 == 1 ? "Find to ens kort! Stjernen i midten er gratis ⭐" : "Find to ens kort! 🔍", "info");
+    }
+
+    private async Task SetSize(int size)
+    {
+        if (size == _size && !_game.IsWon && _game.Moves == 0) return;
+        _size = size;
+        NewGame();
+        await Save(SizeKey, size.ToString());
+    }
+
+    private async Task Tap(Card card)
+    {
+        var round = _round;
+        switch (_game.Flip(card))
+        {
+            case FlipResult.Ignored:
+                return;
+
+            case FlipResult.First:
+                StartClock();
+                await Play("flip", card.Index);
+                return;
+
+            case FlipResult.Match when _game.IsWon:
+                StopClock();
+                _finalTime = Elapsed;
+                Say($"🎉 Alle par på {_game.Moves} træk!", "success");
+                await Play("flip", card.Index);
+                await Play("match");
+                await RecordBest();
+                await Task.Delay(700);
+                if (round != _round) return;
+                _party = true;
+                _focusAgain = true;
+                await Play("win");
+                return;
+
+            case FlipResult.Match:
+                Say(MatchCheers[(_game.Pairs - 1) % MatchCheers.Length], "success");
+                await Play("flip", card.Index);
+                await Play("match");
+                return;
+
+            case FlipResult.Miss:
+                Say(MissHints[_game.Moves % MissHints.Length], "info");
+                await Play("flip", card.Index);
+                await Play("miss");
+                await Task.Delay(MissShowMs);
+                if (round != _round) return;
+                _game.HideMiss();
+                return;
+        }
+    }
+
+    private async Task RecordBest()
+    {
+        var key = BestKeyPrefix + _size;
+        var previous = int.TryParse(await Load(key), out var best) ? best : 0;
+        var label = $"{_size}×{_size}";
+
+        if (previous == 0 || _game.Moves < previous)
+        {
+            await Save(key, _game.Moves.ToString());
+            _bestText = previous == 0 ? $"Første sejr på {label}!" : $"Ny rekord på {label}! 🥇";
+        }
+        else
+        {
+            _bestText = $"Rekord på {label}: {previous} træk";
+        }
+    }
+
+    private void Say(string message, string kind)
+    {
+        _message = message;
+        _messageKind = kind;
+        _messageKey++;
+    }
+
+    // ---------- Clock ----------
+
+    private void StartClock()
+    {
+        if (_startedAt is not null) return;
+        _startedAt = DateTime.UtcNow;
+        _clock = new Timer(_ => InvokeAsync(StateHasChanged), null, 500, 500);
+    }
+
+    private void StopClock()
+    {
+        _clock?.Dispose();
+        _clock = null;
+    }
+
+    private static string Clock(TimeSpan time) => $"{(int)time.TotalMinutes}:{time.Seconds:00}";
+
+    // ---------- Sound and storage ----------
+
+    private void ToggleSound() => _soundOn = !_soundOn;
+
+    private async Task Play(string sound, params object[] args)
+    {
+        if (!_soundOn) return;
+        try
+        {
+            await JS.InvokeVoidAsync($"gameSounds.{sound}", args);
+        }
+        catch (JSException)
+        {
+            // No audio support: the game still works without sound.
+        }
+    }
+
+    private async Task<string?> Load(string key)
+    {
+        try { return await JS.InvokeAsync<string?>("huske.load", key); }
+        catch (JSException) { return null; }
+    }
+
+    private async Task Save(string key, string value)
+    {
+        try { await JS.InvokeVoidAsync("huske.save", key, value); }
+        catch (JSException) { }
+    }
+
+    public void Dispose() => StopClock();
+
+    // ---------- Drawing helpers ----------
+
+    private string CardLabel(Card card) =>
+        card.IsMatched ? $"Kort {card.Index + 1}: {card.Emoji}, fundet"
+        : card.IsUp ? $"Kort {card.Index + 1}: {card.Emoji}"
+        : $"Kort {card.Index + 1}: skjult";
+
+    /// <summary>The game's own pictures rain down when the board is cleared.</summary>
+    private static string Rain(int i)
+    {
+        // Spread out by a fixed pattern rather than Random, so the pieces don't jump on re-render.
+        var left = i * 37 % 100;
+        var delay = i * 53 % 100 / 50.0;
+        var duration = 2.2 + i * 29 % 10 / 8.0;
+        var size = 1.8 + i * 17 % 10 / 7.0;
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        return $"left:{left}%;font-size:{size.ToString(inv)}rem;animation-delay:{delay.ToString(inv)}s;animation-duration:{duration.ToString(inv)}s";
+    }
+}
