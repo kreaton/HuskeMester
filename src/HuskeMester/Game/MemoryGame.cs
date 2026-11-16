@@ -28,7 +28,7 @@ public enum FlipResult
 /// </summary>
 public sealed class MemoryGame
 {
-    public static readonly int[] Sizes = [2, 3, 4, 5, 6, 7, 8];
+    public static readonly int[] Sizes = [3, 4, 5, 6, 7, 8];
 
     /// <summary>Child-friendly emoji, one code point each. 8×8 needs 32 different ones.</summary>
     public static readonly IReadOnlyList<string> Pool =

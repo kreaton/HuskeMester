@@ -15,7 +15,7 @@ It is a Blazor WebAssembly app (.NET 10) that runs entirely in the browser, with
 
 ## How to play
 
-Pick a board from **2×2** to **8×8** at the top and tap a card to turn it. Tap a second card:
+Pick a board from **3×3** to **8×8** at the top and tap a card to turn it. Tap a second card:
 
 - **The same picture:** the two cards stay up with a green ring, and you hear a ping.
 - **Different pictures:** they get an orange ring, shake, and turn back after about a second.
